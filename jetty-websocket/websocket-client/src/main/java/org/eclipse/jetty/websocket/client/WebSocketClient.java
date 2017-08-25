@@ -35,6 +35,7 @@ import org.eclipse.jetty.io.ByteBufferPool;
 import org.eclipse.jetty.io.MappedByteBufferPool;
 import org.eclipse.jetty.util.DecoratedObjectFactory;
 import org.eclipse.jetty.util.StringUtil;
+import org.eclipse.jetty.util.component.Container;
 import org.eclipse.jetty.util.component.ContainerLifeCycle;
 import org.eclipse.jetty.util.log.Log;
 import org.eclipse.jetty.util.log.Logger;
@@ -62,20 +63,21 @@ import org.eclipse.jetty.websocket.common.scopes.WebSocketContainerScope;
 /**
  * WebSocketClient provides a means of establishing connections to remote websocket endpoints.
  */
-public class WebSocketClient extends ContainerLifeCycle implements WebSocketContainerScope
+public class WebSocketClient extends ContainerLifeCycle implements WebSocketContainerScope, Container.Listener
 {
     private static final Logger LOG = Log.getLogger(WebSocketClient.class);
 
     // From HttpClient
     private final HttpClient httpClient;
 
-    //
+
     private final WebSocketContainerScope containerScope;
     private final WebSocketExtensionFactory extensionRegistry;
     private final EventDriverFactory eventDriverFactory;
     private final SessionFactory sessionFactory;
 
     private final int id = ThreadLocalRandom.current().nextInt();
+    private boolean lifecycleManaged = false;
 
     /**
      * Instantiate a WebSocketClient with defaults
@@ -378,6 +380,7 @@ public class WebSocketClient extends ContainerLifeCycle implements WebSocketCont
         if (LOG.isDebugEnabled())
             LOG.debug("connect websocket {} to {}",websocket,toUri);
 
+        // Delay init (required for heavy usages seen in Web container)
         init();
 
         WebSocketUpgradeRequest wsReq = new WebSocketUpgradeRequest(this,httpClient,request);
@@ -398,6 +401,31 @@ public class WebSocketClient extends ContainerLifeCycle implements WebSocketCont
 
         if (LOG.isDebugEnabled())
             LOG.debug("Stopped {}",this);
+    }
+
+    @Override
+    public void beanAdded(Container parent, Object child)
+    {
+        if (child == this)
+        {
+            lifecycleManaged = true;
+            // We were added to a parent LifeCycle, don't bother with JVM shutdown now.
+            ShutdownThread.deregister(this);
+        }
+    }
+
+    @Override
+    public void beanRemoved(Container parent, Object child)
+    {
+        if (child == this)
+        {
+            lifecycleManaged = false;
+            // We were removed from parent LifeCycle, re-enable JVM shutdown behavior
+            if (!ShutdownThread.isRegistered(this))
+            {
+                ShutdownThread.register(this);
+            }
+        }
     }
 
     @Deprecated
@@ -552,7 +580,7 @@ public class WebSocketClient extends ContainerLifeCycle implements WebSocketCont
 
     private synchronized void init() throws IOException
     {
-        if (!ShutdownThread.isRegistered(this))
+        if (!ShutdownThread.isRegistered(this) && !lifecycleManaged)
         {
             ShutdownThread.register(this);
         }
